@@ -1,0 +1,32 @@
+[project]
+name = "dwarfintheflask"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "byaldi>=0.0.5",
+    "flask>=3.0.3",
+    "flask-cors>=5.0.0",
+    "librosa>=0.10.2.post1",
+    "qwen-vl-utils>=0.0.8",
+    "ragatouille>=0.0.8.post4",
+    "transformers>=4.46.2",
+    "pdf2image>=1.17.0",
+    "pillow>=10.4.0",
+    "torch>=2.5.1",
+    "claudette>=0.1.0",
+    "werkzeug>=3.1.2",
+    "torchvision>=0.20.1",
+    "setuptools>=75.3.0",
+    "python-dotenv>=1.0.1",
+
+]
+
+[build-system]
+requires = [
+    "setuptools>=75.3.0",
+    "wheel",
+    "torch>=2.5.1",
+    "ninja"
+]

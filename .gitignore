@@ -1,0 +1,7 @@
+.byaldi
+*.pyc
+.venv
+*.env
+*.egg-info
+uv.lock
+state.json
