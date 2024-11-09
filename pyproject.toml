@@ -20,7 +20,7 @@ dependencies = [
     "torchvision>=0.20.1",
     "setuptools>=75.3.0",
     "python-dotenv>=1.0.1",
-
+    "marker-pdf>=0.3.10",
 ]
 
 [build-system]
