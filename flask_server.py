@@ -463,34 +463,6 @@ def index_text():
         logger.exception("An error occurred during indexing")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/indexMarkdown', methods=['POST'])
-def index_markdown():
-    data = request.json
-    if not data or 'content' not in data or 'filename' not in data:
-        return jsonify({'error': 'Missing content or filename'}), 400
-
-    content = data['content']
-    filename = secure_filename(data['filename'])
-
-    text_hash = calculate_text_hash(content)
-    if text_hash not in state["indexed_texts"]:
-        try:
-            if os.path.exists('./.ragatouille/obsidian'):
-                RAG = RAGPretrainedModel.from_index("obsidian", verbose=1)
-                RAG.add_to_index(index_name="obsidian", new_collection=[content], new_document_ids=[filename])
-            else:
-                RAG = RAGPretrainedModel.from_pretrained("colbert-ir/colbertv2.0", verbose=1)
-                RAG.index(index_name="obsidian", collection=[content], document_ids=[filename])
-
-            state["indexed_texts"].append(text_hash)
-            save_state(state)
-            return jsonify({'message': 'Markdown indexed successfully'})
-        except Exception as e:
-            logger.exception("An error occurred during indexing")
-            return jsonify({"error": str(e)}), 500
-    else:
-        return jsonify({'message': 'Markdown already indexed'})
-
 def update_markdown_links(markdown_content, image_folder):
     pattern = r'!\[(.*?)\]\((.*?)\)'
     def replace_link(match):
