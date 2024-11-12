@@ -50,8 +50,10 @@ def load_state():
             "mappings": {}
         },
         "document_metadata": {},
-        "indexed_files": [],
-        "indexed_texts": []
+        "indexed_files": {},
+        "file_indices": [],
+        "indexed_texts": {},
+        "text_indices": []
     }
 
     if os.path.exists(STATE_FILE):
@@ -73,6 +75,10 @@ indexed_files = set(state["indexed_files"])
 indexed_texts = set(state["indexed_texts"])
 document_mapping = state["document_mapping"]
 document_metadata = state["document_metadata"]
+
+@app.route('/get_indices', methods=['GET'])
+def get_indices():
+    return jsonify(state["file_indices"])
 
 def validate_image(base64_data):
     try:
@@ -278,8 +284,8 @@ def search():
     query = data.get('query', "")
     if query == "":
         return "Search query required"
-    index_name = data.get("index_name", "obsidian")
-
+    index_name = data.get("index_name", "universal")
+    print(index_name)
     topk = data.get('topk', 10)
     image_results = []
     text_results = []
@@ -330,12 +336,14 @@ def search():
 def index_pdf():
     logger.info("Starting index_pdf function")
     data = request.json
+
     if not data or 'pdf_content' not in data or 'filename' not in data:
         logger.error("Missing PDF content or filename")
         return jsonify({'error': 'Missing PDF content or filename'}), 400
 
     filename = secure_filename(data['filename'])
     pdf_content = base64.b64decode(data['pdf_content'])
+    index_name = data.get('index_name', 'universal')
 
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
         temp_file.write(pdf_content)
@@ -343,62 +351,74 @@ def index_pdf():
 
     file_hash = calculate_sha256(file_path)
 
+    mapped = False
+    doc_id = None
+    title = None
+    authors = None
     # Check if already indexed
-    for doc_id, mapping in state["document_mapping"]["mappings"].items():
+    for current_doc_id, mapping in state["document_mapping"]["mappings"].items():
         if mapping['hash'] == file_hash:
+            mapped = True
+            doc_id = int(current_doc_id)
+            title = mapping["title"]
+            authors = mapping["authors"]
+
+    if mapped == False:
+        # Get next doc_id
+        doc_id = state["document_mapping"]["next_id"]
+        state["document_mapping"]["next_id"] += 1
+
+        # Extract metadata
+        try:
+            title, authors = extract_metadata_with_qwen(file_path)
+        except Exception as e:
+            logger.error(f"Error extracting metadata: {str(e)}")
+            title, authors = "Unknown", "Unknown"
+
+        # Update state
+        state["document_mapping"]["mappings"][doc_id] = {
+            'hash': file_hash,
+            'title': str(title),
+            'authors': str(authors),
+            'filename': filename
+        }
+        save_state(state)
+
+        metadata_dict = {
+            doc_id: {
+                "title": str(title),
+                "authors": str(authors),
+                "filename": str(filename),
+                "doc_id": str(doc_id)
+            }
+        }
+
+    if file_hash in list(state["indexed_files"].keys()):
+        if index_name in state["indexed_files"][file_hash]:
             os.remove(file_path)
             return jsonify({'message': 'File already indexed', 'doc_id': doc_id})
 
-    # Get next doc_id
-    doc_id = state["document_mapping"]["next_id"]
-    state["document_mapping"]["next_id"] += 1
-
-    # Extract metadata
-    try:
-        title, authors = extract_metadata_with_qwen(file_path)
-    except Exception as e:
-        logger.error(f"Error extracting metadata: {str(e)}")
-        title, authors = "Unknown", "Unknown"
-
-    # Update state
-    state["document_mapping"]["mappings"][doc_id] = {
-        'hash': file_hash,
-        'title': str(title),
-        'authors': str(authors),
-        'filename': filename
-    }
-    save_state(state)
-
-    metadata_dict = {
-        doc_id: {
-            "title": str(title),
-            "authors": str(authors),
-            "filename": str(filename),
-            "doc_id": str(doc_id)
-        }
-    }
-
     try:
         logger.info("Creating new individual index")
-        RAG = RAGMultiModalModel.from_pretrained("vidore/colpali-v1.2", verbose=1)
-        RAG.model.model = RAG.model.model.float()
-        RAG.index(
-            input_path=file_path,
-            index_name=file_hash,
-            store_collection_with_index=True,
-            overwrite=False,
-            doc_ids=[doc_id]
-        )
+        if not os.path.exists(f'./.byaldi/{file_hash}'):
+            RAG = RAGMultiModalModel.from_pretrained("vidore/colpali-v1.2", verbose=1)
+            RAG.model.model = RAG.model.model.float()
+            RAG.index(
+                input_path=file_path,
+                index_name=file_hash,
+                store_collection_with_index=True,
+                overwrite=False,
+                doc_ids=[doc_id]
+            )
     except Exception as e:
         logger.exception(f"Error indexing PDF {filename}: {str(e)}")
         return jsonify({'error': 'Failed to index PDF', 'details': str(e)}), 500
 
     logger.info("Individual indexing completed successfully")
 
-    print(metadata_dict)
     try:
-        if os.path.exists('./.byaldi/obsidian'):
-            RAG = RAGMultiModalModel.from_index("obsidian", verbose=1)
+        if os.path.exists(f'./.byaldi/{index_name}'):
+            RAG = RAGMultiModalModel.from_index(index_name, verbose=1)
             RAG.model.model = RAG.model.model.float()
             RAG.add_to_index(
                 input_item=file_path,
@@ -410,7 +430,7 @@ def index_pdf():
             RAG.model.model = RAG.model.model.float()
             RAG.index(
                 input_path=file_path,
-                index_name="obsidian",
+                index_name=index_name,
                 store_collection_with_index=True,
                 overwrite=False,
                 doc_ids=[doc_id],
@@ -419,7 +439,14 @@ def index_pdf():
         logger.exception(f"Error indexing PDF {filename}: {str(e)}")
         return jsonify({'error': 'Failed to index PDF', 'details': str(e)}), 500
 
-    state["indexed_files"].append(file_hash)
+    if file_hash in list(state["indexed_files"].keys()):
+        state["indexed_files"][file_hash].append(index_name)
+    else:
+        state["indexed_files"][file_hash] = [index_name]
+
+    if index_name != state["file_indices"]:
+        state["file_indices"].append(index_name)
+
     save_state(state)
 
     os.remove(file_path)
@@ -433,7 +460,7 @@ def index_pdf():
 @app.route('/indexText', methods=['POST'])
 def index_text():
     data = request.json
-    index_name = data.get('index_name', 'obsidian')
+    index_name = data.get('index_name', 'universal')
     texts = data.get('texts', [])
 
     if not texts:
