@@ -311,19 +311,23 @@ def search():
             }
             image_results.append(processed_result)
 
-    if os.path.exists(f'./.ragatouille/{index_name}'):
-        TextRAG = RAGPretrainedModel.from_index(f"{index_name}", verbose=1)
+    if os.path.exists(f'./.ragatouille/colbert/indexes/{index_name}'):
+        TextRAG = RAGPretrainedModel.from_index(f"./.ragatouille/colbert/indexes/{index_name}", verbose=1)
         raw_text_results = TextRAG.search(query, k=topk)
+
         for result in raw_text_results:
             # Convert doc_id to string for dictionary lookup
-            doc_id_str = str(result.doc_id)
+            print(result)
+            doc_id_str = str(result.get('document_id'))
             metadata = state["document_mapping"]["mappings"].get(doc_id_str, {})
 
+            print(metadata)
             processed_result = {
-                "score": float(result.score),
+                "content": result.get('content'),
+                "score": float(result.get('score')),
                 "doc_id": doc_id_str,
-                "page_num": str(result.page_num) if hasattr(result, 'page_num') else None,
-                "metadata": {k: str(v) for k, v in result.metadata.items()} if result.metadata else {},
+                "page_num": str(result.get('page_num')) if hasattr(result, 'page_num') else None,
+                "metadata": metadata,
                 "title": metadata.get("title", "Unknown"),
                 "authors": metadata.get("authors", "Unknown"),
                 "filename": metadata.get("filename", "Unknown")
@@ -457,37 +461,222 @@ def index_pdf():
         'authors': authors
     })
 
-@app.route('/indexText', methods=['POST'])
-def index_text():
-    data = request.json
-    index_name = data.get('index_name', 'universal')
-    texts = data.get('texts', [])
+def extract_text_metadata_with_qwen(text):
+    # Initialize model and processor
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+        device_map="auto",
+    )
+    processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
 
-    if not texts:
-        return jsonify({"error": "No texts provided"}), 400
+    # Split text into paragraphs
+    paragraphs = text.split('\n\n')
+
+    # Take approximately first 5 paragraphs or 2000 characters, whichever is shorter
+    # This is roughly equivalent to first few pages worth of content
+    preview_text = ''
+    char_count = 0
+    max_chars = 2000  # Adjust this based on model's context window
+
+    for para in paragraphs[:5]:  # Look at first 5 paragraphs maximum
+        if char_count + len(para) <= max_chars:
+            preview_text += para + '\n\n'
+            char_count += len(para) + 2
+        else:
+            # Add as much of the paragraph as possible without exceeding max_chars
+            remaining_chars = max_chars - char_count
+            preview_text += para[:remaining_chars] + '...'
+            break
+
+    # Prepare prompt with preview
+    messages = [{
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"Given this excerpt from the beginning of a text: \n\n"
+                    f"{preview_text}\n\n"
+                    f"What is the title of this text? Who are the authors? "
+                    f"Please respond in a json format with the keys Title and Authors. "
+                    f"Authors should just be a list of names. "
+                    f"If you cannot determine the title or authors, use empty values."
+                )
+            }
+        ]
+    }]
 
     try:
-        new_texts = []
-        for text in texts:
-            text_hash = calculate_text_hash(text)
-            if text_hash not in state["indexed_texts"]:
-                new_texts.append(text)
-                state["indexed_texts"].append(text_hash)
+        # Prepare for inference
+        text_input = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = processor(
+            text=[text_input],
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to("cuda")
 
-        if not new_texts:
-            return jsonify({"message": "All texts have already been indexed"}), 200
+        # Generate response
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=1024,
+            temperature=0.2,  # Lower temperature for more focused responses
+            do_sample=False,  # Deterministic generation for metadata
+        )
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_text = processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )[0]
 
-        if os.path.exists(f'./.ragatouille/{index_name}'):
-            RAG = RAGPretrainedModel.from_index(index_name, verbose=1)
-            RAG.add_to_index(index_name=index_name, new_collection=new_texts)
+        # Parse response
+        json_str = output_text
+        if '```json' in json_str:
+            json_str = json_str.split('```json\n')[1].split('\n```')[0]
+        elif '```' in json_str:
+            json_str = json_str.split('```\n')[1].split('\n```')[0]
+
+        metadata = json.loads(json_str)
+        title = metadata.get('Title', '').strip()
+        authors = metadata.get('Authors', [])
+
+        # Clean up authors
+        if isinstance(authors, str):
+            # Handle case where model returns authors as string
+            authors = [author.strip() for author in authors.split(',')]
+        if isinstance(authors, list):
+            authors = ', '.join(author.strip() for author in authors if author.strip())
+
+        # Validate results
+        if not title or title.lower() in ['unknown', 'n/a', 'none']:
+            title = 'Untitled Document'
+        if not authors or authors.lower() in ['unknown', 'n/a', 'none']:
+            authors = 'Unknown Author'
+
+        return title, authors
+
+    except Exception as e:
+        logger.exception(f"Error extracting metadata from text: {str(e)}")
+        return 'Untitled Document', 'Unknown Author'
+    finally:
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+@app.route('/indexText', methods=['POST'])
+def index_text():
+    logger.info("Starting index_text function")
+    data = request.json
+
+    if not data or 'text' not in data:
+        logger.error("Missing text")
+        return jsonify({'error': 'Missing text'}), 400
+
+    text = data.get('text')
+    index_name = data.get('index_name', 'universal')
+    filename = data.get('filename', '')
+
+    try:
+        text_hash = calculate_text_hash(text)
+        mapped = False
+        doc_id = None
+        title = None
+        authors = None
+
+        # Check if already mapped
+        for current_doc_id, mapping in state["document_mapping"]["mappings"].items():
+            if mapping['hash'] == text_hash:
+                mapped = True
+                doc_id = int(current_doc_id)
+                title = mapping["title"]
+                authors = mapping["authors"]
+                break
+
+        if not mapped:
+            # Get next doc_id
+            doc_id = state["document_mapping"]["next_id"]
+            state["document_mapping"]["next_id"] += 1
+
+            # Extract metadata
+            try:
+                title, authors = extract_text_metadata_with_qwen(text)
+            except Exception as e:
+                logger.error(f"Error extracting metadata: {str(e)}")
+                title, authors = "Unknown", "Unknown"
+
+            # Update state
+            state["document_mapping"]["mappings"][doc_id] = {
+                'hash': text_hash,
+                'title': str(title),
+                'authors': str(authors),
+                'filename': filename
+            }
+            save_state(state)
+
+        # Check if already indexed in this index
+        if text_hash in state["indexed_texts"]:
+            if index_name in state["indexed_texts"][text_hash]:
+                return jsonify({'message': 'File already indexed', 'doc_id': doc_id})
+
+        doc_id = str(doc_id)
+        # Create individual index for the text
+        try:
+            logger.info(f"Creating new individual index for text {doc_id}")
+            if not os.path.exists(f'./.ragatouille/{text_hash}'):
+                RAG = RAGPretrainedModel.from_pretrained("colbert-ir/colbertv2.0", verbose=1)
+                RAG.index(
+                    index_name=text_hash,
+                    collection=[text],
+                    document_ids=[doc_id]
+                )
+        except Exception as e:
+            logger.exception(f"Error creating individual index for text: {str(e)}")
+            return jsonify({'message': 'Error creating individual index', 'doc_id': doc_id})
+
+        # Add to main index
+        try:
+            if os.path.exists(f'./.ragatouille/{index_name}'):
+                RAG = RAGPretrainedModel.from_index(index_name, verbose=1)
+                RAG.add_to_index(
+                    index_name=index_name,
+                    new_collection=[text],
+                    document_ids=[doc_id]
+                )
+            else:
+                RAG = RAGPretrainedModel.from_pretrained("colbert-ir/colbertv2.0", verbose=1)
+                RAG.index(
+                    index_name=index_name,
+                    collection=[text],
+                    document_ids=[doc_id]
+                )
+        except Exception as e:
+            logger.exception(f"Error adding text to main index: {str(e)}")
+            return jsonify({'message': 'Error indexing to main index', 'doc_id': doc_id})
+
+        # Update state with new index information
+        if text_hash in state["indexed_texts"]:
+            if index_name not in state["indexed_texts"][text_hash]:
+                state["indexed_texts"][text_hash].append(index_name)
         else:
-            RAG = RAGPretrainedModel.from_pretrained("colbert-ir/colbertv2.0", verbose=1)
-            RAG.index(index_name=index_name, collection=new_texts)
+            state["indexed_texts"][text_hash] = [index_name]
+
+        if index_name not in state["text_indices"]:
+            state["text_indices"].append(index_name)
 
         save_state(state)
-        return jsonify({"success": True, "message": f"Indexed {len(new_texts)} new texts"})
+
+        return jsonify({
+            'message': 'Texts indexed successfully',
+            'index_name': index_name
+        })
+
     except Exception as e:
-        logger.exception("An error occurred during indexing")
+        logger.exception("An error occurred during text indexing")
         return jsonify({"error": str(e)}), 500
 
 def update_markdown_links(markdown_content, image_folder):

@@ -14,6 +14,9 @@ The Whisper stuff I haven't messed around with enough to find perfect settings, 
 
 To restart your ColBERT index completely, remove the .byaldi folder and the state.json file.
 
+Currently I don't know if it's possible to update a document in an index without redoing the whole thing, so when you're indexing
+notes try to only do ones that are finished or already have most of the information you want to actually search/chat with already.
+
 Roadmap:
 - Cloud/local options for everything
 - Better Whisper

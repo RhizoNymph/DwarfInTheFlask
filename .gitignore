@@ -1,4 +1,5 @@
 .byaldi
+.ragatouille
 *.pyc
 .venv
 *.env
