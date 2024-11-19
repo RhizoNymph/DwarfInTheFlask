@@ -21,3 +21,4 @@ Roadmap:
 - Cloud/local options for everything
 - Better Whisper
 - Docs
+- Whatever the fuck I want
