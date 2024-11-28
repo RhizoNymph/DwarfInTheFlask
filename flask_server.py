@@ -766,32 +766,87 @@ def transcribe_audio():
         return jsonify({"error": "No file part in the request"}), 400
 
     file = request.files['file']
-    if file:
-        try:
-            transcription = transcribe_audio_from_file(
-                file,
-                model_size=request.form.get('model_size', 'base'),
-                chunk_length=int(request.form.get('chunk_length', 30)),
-                stride_length=int(request.form.get('stride_length', 5)),
-                temperature=float(request.form.get('temperature', 0.2)),
-                repetition_penalty=float(request.form.get('repetition_penalty', 1.3))
-            )
-            return jsonify({"success": True, "transcription": transcription})
-        except Exception as e:
-            logger.exception("An error occurred during transcription")
-            return jsonify({"error": str(e)}), 500
-
-def transcribe_audio_from_file(file, model_size="base", chunk_length=30, stride_length=5, temperature=0.0, repetition_penalty=1.0):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-        file.save(temp_file.name)
-        temp_file_path = temp_file.name
+    if not file:
+        logger.error("No selected file")
+        return jsonify({"error": "No selected file"}), 400
 
     try:
+        # Get the filename and check if it's compressed
+        filename = file.filename
+        if not filename:
+            return jsonify({"error": "No filename provided"}), 400
+
+        filename = filename.lower()
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as temp_input:
+            file.save(temp_input.name)
+            temp_input_path = temp_input.name
+
+            try:
+                # Handle compressed files
+                if filename.endswith(('.zip', '.gz', '.bz2', '.tar', '.tar.gz', '.tar.bz2')):
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_output:
+                        if filename.endswith('.zip'):
+                            import zipfile
+                            with zipfile.ZipFile(temp_input_path, 'r') as zip_ref:
+                                for member in zip_ref.namelist():
+                                    if member.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')):
+                                        with zip_ref.open(member) as source:
+                                            temp_output.write(source.read())
+                                        break
+                        # ... rest of the compression handling code ...
+
+                        decompressed_file = temp_output.name
+                else:
+                    decompressed_file = temp_input_path
+
+                # Process the audio file
+                with open(decompressed_file, 'rb') as audio_file:
+                    transcription = transcribe_audio_from_file(
+                        audio_file,
+                        model_size='large',
+                        chunk_length=25,
+                        stride_length=5,
+                        temperature=0.2,
+                        repetition_penalty=1.3
+                    )
+
+                return jsonify({"success": True, "transcription": transcription})
+
+            finally:
+                # Clean up temporary files
+                try:
+                    os.unlink(temp_input_path)
+                    if 'decompressed_file' in locals() and decompressed_file != temp_input_path:
+                        os.unlink(decompressed_file)
+                except Exception as e:
+                    logger.error(f"Error cleaning up temporary files: {e}")
+
+    except Exception as e:
+        logger.exception("An error occurred during transcription")
+        return jsonify({"error": str(e)}), 500
+
+def transcribe_audio_from_file(file, model_size="large", chunk_length=30, stride_length=5, temperature=0.0, repetition_penalty=1.0):
+    try:
+        # Save the file content to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+            # If file is a FileStorage object (from request.files)
+            if hasattr(file, 'save'):
+                file.save(temp_file.name)
+            # If file is already a file object
+            else:
+                temp_file.write(file.read())
+            temp_file_path = temp_file.name
+
+        # Load models
         processor = WhisperProcessor.from_pretrained(f"openai/whisper-{model_size}")
         model = WhisperForConditionalGeneration.from_pretrained(f"openai/whisper-{model_size}")
+
+        # Move model to appropriate device
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
 
+        # Load and process audio
         audio, sr = librosa.load(temp_file_path, sr=16000)
         chunk_size = int(chunk_length * sr)
         stride_size = int(stride_length * sr)
@@ -799,22 +854,39 @@ def transcribe_audio_from_file(file, model_size="base", chunk_length=30, stride_
         transcription = ""
         for i in range(0, len(audio), stride_size):
             chunk = audio[i:i + chunk_size]
-            input_features = processor(chunk, return_tensors="pt", sampling_rate=16000).input_features
-            input_features = input_features.to(device)
+            inputs = processor(
+                chunk,
+                return_tensors="pt",
+                sampling_rate=16000
+            ).to(device)
 
-            predicted_ids = model.generate(
-                input_features,
-                temperature=temperature,
-                repetition_penalty=repetition_penalty,
-                do_sample=temperature > 0.0,
-            )
+            with torch.no_grad():
+                predicted_ids = model.generate(
+                    inputs.input_features,
+                    temperature=temperature,
+                    repetition_penalty=repetition_penalty,
+                    do_sample=temperature > 0.0,
+                )
 
-            chunk_transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-            transcription += chunk_transcription + " "
+            transcribed_text = processor.batch_decode(
+                predicted_ids,
+                skip_special_tokens=True
+            )[0]
+            transcription += transcribed_text + " "
 
         return transcription.strip()
+
+    except Exception as e:
+        logger.exception("Error in transcribe_audio_from_file")
+        raise e
+
     finally:
-        os.unlink(temp_file_path)
+        # Clean up temporary file
+        if 'temp_file_path' in locals():
+            try:
+                os.unlink(temp_file_path)
+            except Exception as e:
+                logger.error(f"Error deleting temporary file: {e}")
 
 if __name__ == '__main__':
     app.run(port=5000, host="0.0.0.0")
