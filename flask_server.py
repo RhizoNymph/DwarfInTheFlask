@@ -71,10 +71,6 @@ def save_state(state):
 
 # Initialize state
 state = load_state()
-indexed_files = set(state["indexed_files"])
-indexed_texts = set(state["indexed_texts"])
-document_mapping = state["document_mapping"]
-document_metadata = state["document_metadata"]
 
 @app.route('/get_indices', methods=['GET'])
 def get_indices():
@@ -280,6 +276,8 @@ def chat():
 
 @app.route('/search', methods=['POST'])
 def search():
+    global state  # Only use the state variable
+    state = load_state()  # Load the latest state before performing the search
     data = request.json
     query = data.get('query', "")
     if query == "":
@@ -295,7 +293,7 @@ def search():
         MultiRAG.model.model = MultiRAG.model.model.float()
         raw_image_results = MultiRAG.search(query, k=topk)
         for result in raw_image_results:
-            # Convert doc_id to string for dictionary lookup
+            # Use state directly instead of document_mapping variable
             doc_id_str = str(result.doc_id)
             metadata = state["document_mapping"]["mappings"].get(doc_id_str, {})
 
@@ -316,12 +314,10 @@ def search():
         raw_text_results = TextRAG.search(query, k=topk)
 
         for result in raw_text_results:
-            # Convert doc_id to string for dictionary lookup
-            print(result)
             doc_id_str = str(result.get('document_id'))
+            # Use state directly instead of document_mapping variable
             metadata = state["document_mapping"]["mappings"].get(doc_id_str, {})
 
-            print(metadata)
             processed_result = {
                 "content": result.get('content'),
                 "score": float(result.get('score')),
@@ -339,6 +335,11 @@ def search():
 @app.route('/indexPDF', methods=['POST'])
 def index_pdf():
     logger.info("Starting index_pdf function")
+    global state
+    indexed_files = state["indexed_files"]
+    indexed_texts = state["indexed_texts"]
+    document_mapping = state["document_mapping"]
+    document_metadata = state["document_metadata"]
     data = request.json
 
     if not data or 'pdf_content' not in data or 'filename' not in data:
@@ -386,7 +387,7 @@ def index_pdf():
             'authors': str(authors),
             'filename': filename
         }
-        save_state(state)
+        save_state(state)  # Save state after updating document_mapping
 
         metadata_dict = {
             doc_id: {
@@ -397,8 +398,8 @@ def index_pdf():
             }
         }
 
-    if file_hash in list(state["indexed_files"].keys()):
-        if index_name in state["indexed_files"][file_hash]:
+    if file_hash in indexed_files:
+        if index_name in indexed_files[file_hash]:
             os.remove(file_path)
             return jsonify({'message': 'File already indexed', 'doc_id': doc_id})
 
@@ -443,15 +444,15 @@ def index_pdf():
         logger.exception(f"Error indexing PDF {filename}: {str(e)}")
         return jsonify({'error': 'Failed to index PDF', 'details': str(e)}), 500
 
-    if file_hash in list(state["indexed_files"].keys()):
-        state["indexed_files"][file_hash].append(index_name)
+    if file_hash in indexed_files:
+        indexed_files[file_hash].append(index_name)
     else:
-        state["indexed_files"][file_hash] = [index_name]
+        indexed_files[file_hash] = [index_name]
 
-    if index_name != state["file_indices"]:
+    if index_name not in state["file_indices"]:
         state["file_indices"].append(index_name)
 
-    save_state(state)
+    save_state(state)  # Save state after updating indexed_files and file_indices
 
     os.remove(file_path)
     return jsonify({
