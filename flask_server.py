@@ -10,7 +10,7 @@ import tempfile
 import imghdr
 
 import torch
-import librosa
+#import librosa
 from PIL import Image
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
@@ -827,67 +827,67 @@ def transcribe_audio():
         logger.exception("An error occurred during transcription")
         return jsonify({"error": str(e)}), 500
 
-def transcribe_audio_from_file(file, model_size="large", chunk_length=30, stride_length=5, temperature=0.0, repetition_penalty=1.0):
-    try:
-        # Save the file content to a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
-            # If file is a FileStorage object (from request.files)
-            if hasattr(file, 'save'):
-                file.save(temp_file.name)
-            # If file is already a file object
-            else:
-                temp_file.write(file.read())
-            temp_file_path = temp_file.name
+# def transcribe_audio_from_file(file, model_size="large", chunk_length=30, stride_length=5, temperature=0.0, repetition_penalty=1.0):
+#     try:
+#         # Save the file content to a temporary file
+#         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+#             # If file is a FileStorage object (from request.files)
+#             if hasattr(file, 'save'):
+#                 file.save(temp_file.name)
+#             # If file is already a file object
+#             else:
+#                 temp_file.write(file.read())
+#             temp_file_path = temp_file.name
 
-        # Load models
-        processor = WhisperProcessor.from_pretrained(f"openai/whisper-{model_size}")
-        model = WhisperForConditionalGeneration.from_pretrained(f"openai/whisper-{model_size}")
+#         # Load models
+#         processor = WhisperProcessor.from_pretrained(f"openai/whisper-{model_size}")
+#         model = WhisperForConditionalGeneration.from_pretrained(f"openai/whisper-{model_size}")
 
-        # Move model to appropriate device
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
+#         # Move model to appropriate device
+#         device = "cuda" if torch.cuda.is_available() else "cpu"
+#         model = model.to(device)
 
-        # Load and process audio
-        audio, sr = librosa.load(temp_file_path, sr=16000)
-        chunk_size = int(chunk_length * sr)
-        stride_size = int(stride_length * sr)
+#         # Load and process audio
+#         audio, sr = librosa.load(temp_file_path, sr=16000)
+#         chunk_size = int(chunk_length * sr)
+#         stride_size = int(stride_length * sr)
 
-        transcription = ""
-        for i in range(0, len(audio), stride_size):
-            chunk = audio[i:i + chunk_size]
-            inputs = processor(
-                chunk,
-                return_tensors="pt",
-                sampling_rate=16000
-            ).to(device)
+#         transcription = ""
+#         for i in range(0, len(audio), stride_size):
+#             chunk = audio[i:i + chunk_size]
+#             inputs = processor(
+#                 chunk,
+#                 return_tensors="pt",
+#                 sampling_rate=16000
+#             ).to(device)
 
-            with torch.no_grad():
-                predicted_ids = model.generate(
-                    inputs.input_features,
-                    temperature=temperature,
-                    repetition_penalty=repetition_penalty,
-                    do_sample=temperature > 0.0,
-                )
+#             with torch.no_grad():
+#                 predicted_ids = model.generate(
+#                     inputs.input_features,
+#                     temperature=temperature,
+#                     repetition_penalty=repetition_penalty,
+#                     do_sample=temperature > 0.0,
+#                 )
 
-            transcribed_text = processor.batch_decode(
-                predicted_ids,
-                skip_special_tokens=True
-            )[0]
-            transcription += transcribed_text + " "
+#             transcribed_text = processor.batch_decode(
+#                 predicted_ids,
+#                 skip_special_tokens=True
+#             )[0]
+#             transcription += transcribed_text + " "
 
-        return transcription.strip()
+#         return transcription.strip()
 
-    except Exception as e:
-        logger.exception("Error in transcribe_audio_from_file")
-        raise e
+#     except Exception as e:
+#         logger.exception("Error in transcribe_audio_from_file")
+#         raise e
 
-    finally:
-        # Clean up temporary file
-        if 'temp_file_path' in locals():
-            try:
-                os.unlink(temp_file_path)
-            except Exception as e:
-                logger.error(f"Error deleting temporary file: {e}")
+#     finally:
+#         # Clean up temporary file
+#         if 'temp_file_path' in locals():
+#             try:
+#                 os.unlink(temp_file_path)
+#             except Exception as e:
+#                 logger.error(f"Error deleting temporary file: {e}")
 
 if __name__ == '__main__':
     app.run(port=5000, host="0.0.0.0")
